@@ -98,6 +98,11 @@ class WizardImportFatturapa(models.TransientModel):
     def _get_account_tax_domain(self, amount):
         tax_domain = super()._get_account_tax_domain(amount)
         if self._is_import_attachment_out():
-            return [("type_tax_use", "=", "sale") if item == ("type_tax_use", "=", "purchase") else item for item in tax_domain]
+            return [
+                ("type_tax_use", "=", "sale")
+                if item == ("type_tax_use", "=", "purchase")
+                else item
+                for item in tax_domain
+            ]
         else:
             return tax_domain
