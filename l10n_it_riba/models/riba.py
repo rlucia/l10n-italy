@@ -5,9 +5,9 @@
 # (<http://www.odoo-italia.org>).
 # Copyright (C) 2012-2017 Lorenzo Battistini - Agile Business Group
 # Copyright 2023 Simone Rubino - Aion Tech
+# Copyright 2024 Nextev Srl
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
-from datetime import date
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
@@ -34,6 +34,12 @@ class RibaList(models.Model):
             for line in riba.line_ids:
                 move_lines |= line.payment_ids
             riba.payment_ids = move_lines
+
+    def _compute_total_amount(self):
+        for riba in self:
+            riba.total_amount = 0.0
+            for line in riba.line_ids:
+                riba.total_amount += line.amount
 
     _name = "riba.slip"
     _description = "RiBa Slip"
@@ -90,7 +96,16 @@ class RibaList(models.Model):
     )
     date_accepted = fields.Date("Acceptance Date")
     date_credited = fields.Date("Credit Date")
-    date_paid = fields.Date("Payment Date", readonly=True)
+    date_paid = fields.Date(
+        string="Payment Date",
+        help="Default date for payments.",
+        readonly=True,
+        states={
+            "credited": [
+                ("readonly", False),
+            ],
+        },
+    )
     date_past_due = fields.Date("Past Due Date", readonly=True)
     company_id = fields.Many2one(
         "res.company",
@@ -122,6 +137,10 @@ class RibaList(models.Model):
         required=True,
         default=lambda self: fields.Date.context_today(self),
         help="Keep empty to use the current date.",
+    )
+    total_amount = fields.Float(
+        string="Amount",
+        compute="_compute_total_amount",
     )
 
     def action_riba_export(self):
@@ -176,10 +195,18 @@ class RibaList(models.Model):
             slip.state = "cancel"
 
     def settle_all_line(self):
-        for riba_list in self:
-            for line in riba_list.line_ids:
-                if line.state == "credited":
-                    line.riba_line_settlement()
+        payment_wizard_action = (
+            self.env["riba.payment.multiple"]
+            .with_context(
+                active_ids=self.ids,
+            )
+            .get_formview_action()
+        )
+        payment_wizard_action.update(
+            name=_("Settle lines"),
+            target="new",
+        )
+        return payment_wizard_action
 
     @api.onchange("date_accepted", "date_credited")
     def _onchange_date(self):
@@ -214,6 +241,11 @@ class RibaList(models.Model):
             riba_list.state = "draft"
             for line in riba_list.line_ids:
                 line.state = "draft"
+
+    def action_open_lines(self):
+        action = self.env.ref("l10n_it_riba.detail_riba_action").read()[0]
+        action["domain"] = [("slip_id", "=", self.id)]
+        return action
 
 
 class RibaListLine(models.Model):
@@ -376,7 +408,7 @@ class RibaListLine(models.Model):
                         line.invoice_number, line.slip_id.name, line.sequence
                     ),
                     "journal_id": journal.id,
-                    "date": line.slip_id.registration_date,
+                    "date": line.due_date,
                 }
             )
             to_be_reconciled = self.env["account.move.line"]
@@ -453,7 +485,26 @@ class RibaListLine(models.Model):
             if not line.slip_id.date_accepted:
                 line.slip_id.date_accepted = fields.Date.context_today(self)
 
-    def riba_line_settlement(self):
+    def button_settle(self):
+        payment_wizard_action = (
+            self.env["riba.payment.multiple"]
+            .with_context(
+                active_ids=self.slip_id.ids,
+                default_riba_line_ids=self.ids,
+            )
+            .get_formview_action()
+        )
+        payment_wizard_action.update(
+            name=_("Settle line"),
+            target="new",
+        )
+        return payment_wizard_action
+
+    def riba_line_settlement(self, date=None):
+        """Create payment the acceptance move of each line in `self`.
+
+        :param date: The created payment's date.
+        """
         for riba_line in self:
             if not riba_line.slip_id.config_id.settlement_journal_id:
                 raise UserError(_("Please define a Settlement Journal."))
@@ -476,12 +527,13 @@ class RibaListLine(models.Model):
                 riba_line.slip_id.name,
                 riba_line.partner_id.name,
             )
+            move_date = date or riba_line.due_date.strftime("%Y-%m-%d")
             settlement_move = move_model.create(
                 {
                     "journal_id": (
                         riba_line.slip_id.config_id.settlement_journal_id.id
                     ),
-                    "date": date.today().strftime("%Y-%m-%d"),
+                    "date": move_date,
                     "ref": move_ref,
                 }
             )
@@ -516,6 +568,11 @@ class RibaListLine(models.Model):
             to_be_settled |= settlement_move_line
 
             to_be_settled.reconcile()
+
+    def settle_riba_line(self):
+        for line in self:
+            if line.state == "credited":
+                line.riba_line_settlement()
 
 
 class RibaListMoveLine(models.Model):
