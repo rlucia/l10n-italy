@@ -627,6 +627,25 @@ class TestFatturaPAXMLValidation(FatturapaCommon):
         self.assertEqual(invoice.e_invoice_amount_untaxed, -20.0)
         self.assertEqual(invoice.e_invoice_amount_tax, -4.4)
 
+    def test_33_negative_tax_rate(self):
+        """When importing with Tax Rate level,
+        negative tax rate is imported in a line with negative amount."""
+        res = self.run_wizard(
+            "test33_tax_rate",
+            "IT01234567890_FPR07_bill.xml",
+            wiz_values={
+                "e_invoice_detail_level": "1",
+            },
+        )
+        invoice = self.invoice_model.search(res["domain"])
+        self.assertEqual(invoice.move_type, "in_invoice")
+        # The negative line is also the one
+        # with the exigible tax (0 amount)
+        negative_line = invoice.invoice_line_ids.filtered(
+            lambda line: not line.tax_ids.amount
+        )
+        self.assertEqual(negative_line.price_unit, -10)
+
     def test_34_xml_import(self):
         # No Ritenuta lines set
         res = self.run_wizard("test34", "IT01234567890_FPR08.xml")
@@ -972,6 +991,21 @@ class TestFatturaPAXMLValidation(FatturapaCommon):
         self.assertEqual(invoice.invoice_line_ids[0].price_subtotal, 1.5)
         self.assertEqual(invoice.move_type, "in_refund")
 
+    def test_xml_import_bank_overwrite(self):
+        """
+        Test: Check if the bank account is overwritten by the XML file
+        """
+        bank = self.env["res.bank"].create(
+            [
+                {
+                    "name": "Bank Test 001",
+                    "bic": "TESTTES1",
+                }
+            ]
+        )
+        self.run_wizard("test56", "IT02780790107_11004_bank.xml")
+        self.assertEqual(bank.name, "Bank Test 001")
+
     def test_01_xml_link(self):
         """
         E-invoice lines are created.
@@ -1149,6 +1183,65 @@ class TestFatturaPAXMLValidation(FatturapaCommon):
         self.assertEqual(invoice.amount_untaxed, 23.27)
         self.assertEqual(invoice.amount_tax, 5.12)
         self.assertEqual(invoice.amount_total, 28.39)
+
+    def test_increased_decimal_precision(self):
+        """
+        Increase price decimal precision during import:
+        computation of line's price is more accurate.
+        """
+        res = self.run_wizard(
+            "increased_decimal_precision",
+            "IT01234567890_FPR16.xml",
+            wiz_values={
+                "price_decimal_digits": 3,
+            },
+        )
+
+        # The new precision allows to compute the correct amount
+        invoice = self.invoice_model.search(res["domain"])
+        expected_invoice_values = {
+            "amount_untaxed": 66.79,
+            "amount_tax": 14.69,
+            "amount_total": 81.48,
+        }
+        self.assertRecordValues(
+            invoice,
+            [
+                expected_invoice_values,
+            ],
+        )
+        invoice_line = invoice.invoice_line_ids
+        expected_invoice_line_values = {
+            "price_subtotal": 66.79,
+            "price_total": 81.48,
+        }
+        self.assertRecordValues(
+            invoice_line,
+            [
+                expected_invoice_line_values,
+            ],
+        )
+
+        # Trigger amounts recomputation because:
+        # date triggers an update on date_due
+        # date_due triggers an update on needed_terms
+        # needed_terms needs amount_total_signed
+        with Form(invoice) as invoice_form:
+            invoice_form.date = fields.Date.today()
+
+        # The correct amount is kept
+        self.assertRecordValues(
+            invoice,
+            [
+                expected_invoice_values,
+            ],
+        )
+        self.assertRecordValues(
+            invoice_line,
+            [
+                expected_invoice_line_values,
+            ],
+        )
 
 
 class TestFatturaPAEnasarco(FatturapaCommon):

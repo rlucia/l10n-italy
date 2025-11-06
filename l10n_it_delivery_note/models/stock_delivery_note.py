@@ -1,11 +1,19 @@
 # Copyright (c) 2019, Link IT Europe Srl
 # @author: Matteo Bilotta <mbilotta@linkeurope.it>
+# Copyright 2023 Simone Rubino - Aion Tech
+# License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
 import datetime
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 
+from ..mixins.delivery_mixin import (
+    _default_volume_uom,
+    _default_weight_uom,
+    _domain_volume_uom,
+    _domain_weight_uom,
+)
 from ..mixins.picking_checker import (
     DOMAIN_PICKING_TYPES,
     DONE_PICKING_STATE,
@@ -46,6 +54,7 @@ class StockDeliveryNote(models.Model):
         "mail.activity.mixin",
         "stock.picking.checker.mixin",
         "shipping.information.updater.mixin",
+        "l10n_it_delivery_note.delivery_mixin",
     ]
     _description = "Delivery Note"
     _order = "date DESC, id DESC"
@@ -64,24 +73,16 @@ class StockDeliveryNote(models.Model):
         )
 
     def _default_volume_uom(self):
-        return self.env.ref("uom.product_uom_litre", raise_if_not_found=False)
+        return _default_volume_uom(self)
 
     def _domain_volume_uom(self):
-        uom_category_id = self.env.ref(
-            "uom.product_uom_categ_vol", raise_if_not_found=False
-        )
-
-        return [("category_id", "=", uom_category_id.id)]
+        return _domain_volume_uom(self)
 
     def _default_weight_uom(self):
-        return self.env.ref("uom.product_uom_kgm", raise_if_not_found=False)
+        return _default_weight_uom(self)
 
     def _domain_weight_uom(self):
-        uom_category_id = self.env.ref(
-            "uom.product_uom_categ_kgm", raise_if_not_found=False
-        )
-
-        return [("category_id", "=", uom_category_id.id)]
+        return _domain_weight_uom(self)
 
     active = fields.Boolean(default=True)
     name = fields.Char(
@@ -289,6 +290,70 @@ class StockDeliveryNote(models.Model):
     can_change_number = fields.Boolean(compute="_compute_boolean_flags")
     show_product_information = fields.Boolean(compute="_compute_boolean_flags")
     company_id = fields.Many2one("res.company", required=True, default=_default_company)
+
+    # Sync with delivery mixin fields
+    delivery_transport_reason_id = fields.Many2one(
+        related="transport_reason_id",
+        readonly=True,
+    )
+    delivery_transport_condition_id = fields.Many2one(
+        related="transport_condition_id",
+        readonly=True,
+    )
+    delivery_transport_method_id = fields.Many2one(
+        related="transport_method_id",
+        readonly=True,
+    )
+    delivery_carrier_id = fields.Many2one(
+        related="carrier_id",
+        readonly=True,
+    )
+    delivery_goods_appearance_id = fields.Many2one(
+        related="goods_appearance_id",
+        readonly=True,
+    )
+    delivery_volume_uom_id = fields.Many2one(
+        related="volume_uom_id",
+        readonly=True,
+        default=None,
+        domain=None,
+    )
+    delivery_volume = fields.Float(
+        related="volume",
+        readonly=True,
+    )
+    delivery_gross_weight_uom_id = fields.Many2one(
+        related="gross_weight_uom_id",
+        readonly=True,
+        default=None,
+        domain=None,
+    )
+    delivery_gross_weight = fields.Float(
+        related="gross_weight",
+        readonly=True,
+    )
+    delivery_net_weight_uom_id = fields.Many2one(
+        related="net_weight_uom_id",
+        readonly=True,
+        default=None,
+        domain=None,
+    )
+    delivery_net_weight = fields.Float(
+        related="net_weight",
+        readonly=True,
+    )
+    delivery_transport_datetime = fields.Datetime(
+        related="transport_datetime",
+        readonly=True,
+    )
+    delivery_packages = fields.Integer(
+        related="packages",
+        readonly=True,
+    )
+    delivery_note = fields.Html(
+        related="note",
+        readonly=True,
+    )
 
     _sql_constraints = [
         (
@@ -538,14 +603,23 @@ class StockDeliveryNote(models.Model):
     def _action_confirm(self):
         for note in self:
             sequence = note.type_id.sequence_id
-
-            note.state = DOMAIN_DELIVERY_NOTE_STATES[1]
-            if not note.date:
-                note.date = datetime.date.today()
-
+            dt = note.date or datetime.date.today()
+            vals = {"state": DOMAIN_DELIVERY_NOTE_STATES[1], "date": dt}
             if not note.name:
-                note.name = sequence.next_by_id()
-                note.sequence_id = sequence
+                # Avoid duplicates
+                while True:
+                    name = sequence.with_context(ir_sequence_date=dt).next_by_id()
+                    if not self.search(
+                        [
+                            ("name", "=", name),
+                            ("company_id", "=", note.company_id.id),
+                        ]
+                    ):
+                        break
+
+                vals.update({"name": name, "sequence_id": sequence.id})
+
+            note.write(vals)
 
     def action_confirm(self):
         for note in self:
@@ -625,11 +699,8 @@ class StockDeliveryNote(models.Model):
                 raise UserError(
                     _("%s hasn't sale order!") % delivery_note_id.display_name
                 )
-            if (
-                len(
-                    delivery_note_id.mapped("sale_ids.picking_ids.picking_type_id.code")
-                )
-                > 1
+            if "incoming" in delivery_note_id.mapped(
+                "sale_ids.picking_ids.picking_type_id.code"
             ):
                 raise UserError(
                     _(

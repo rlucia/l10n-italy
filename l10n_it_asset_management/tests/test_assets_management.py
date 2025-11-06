@@ -5,7 +5,7 @@
 from datetime import date
 
 from odoo import fields
-from odoo.exceptions import ValidationError
+from odoo.exceptions import AccessError, ValidationError
 from odoo.fields import Command
 from odoo.tools.date_utils import relativedelta
 
@@ -90,7 +90,7 @@ class TestAssets(Common):
             .create(
                 {
                     "management_type": "dismiss",
-                    "asset_id": asset.id,
+                    "l10n_it_asset_id": asset.id,
                 }
             )
         )
@@ -128,7 +128,7 @@ class TestAssets(Common):
             .create(
                 {
                     "management_type": "dismiss",
-                    "asset_id": asset.id,
+                    "l10n_it_asset_id": asset.id,
                     "dismiss_date": sale_invoice.invoice_date,
                 }
             )
@@ -204,7 +204,7 @@ class TestAssets(Common):
             .create(
                 {
                     "management_type": "dismiss",
-                    "asset_id": asset.id,
+                    "l10n_it_asset_id": asset.id,
                 }
             )
         )
@@ -342,7 +342,7 @@ class TestAssets(Common):
                 {
                     "management_type": "update",
                     "category_id": self.asset_category_1.id,
-                    "asset_id": asset.id,
+                    "l10n_it_asset_id": asset.id,
                     "depreciation_type_ids": [Command.set(civ_type.ids)],
                 }
             )
@@ -449,7 +449,7 @@ class TestAssets(Common):
                 {
                     "management_type": "update",
                     "category_id": self.asset_category_1.id,
-                    "asset_id": asset.id,
+                    "l10n_it_asset_id": asset.id,
                     "depreciation_type_ids": [Command.set(civ_type.ids)],
                 }
             )
@@ -485,7 +485,7 @@ class TestAssets(Common):
             entry,
             "update",
             wiz_values={
-                "asset_id": asset,
+                "l10n_it_asset_id": asset,
             },
         )
 
@@ -511,7 +511,7 @@ class TestAssets(Common):
             entry,
             "update",
             wiz_values={
-                "asset_id": asset,
+                "l10n_it_asset_id": asset,
             },
         )
 
@@ -522,6 +522,52 @@ class TestAssets(Common):
         self.assertEqual(
             depreciation_info.amount_residual, asset.purchase_amount - removed_amount
         )
+
+    def test_max_amount_depreciable(self):
+        """
+        Set max amount depreciable in category line,
+        if the asset has a higher amount, the max amount is set as depreciable instead.
+        """
+        # Arrange
+        purchase_amount = 1000
+        max_depreciable_amount = 120
+        category = self.asset_category_1
+        civ_type = self.env.ref("l10n_it_asset_management.ad_type_civilistico")
+        category_civ_depreciation_type = category.type_ids.filtered(
+            lambda x: x.depreciation_type_id == civ_type
+        )
+        category_civ_depreciation_type.update(
+            {
+                "base_max_amount": max_depreciable_amount,
+            }
+        )
+        purchase_invoice = self._create_purchase_invoice(
+            fields.Date.today(), amount=purchase_amount
+        )
+        # pre-condition
+        self.assertEqual(purchase_invoice.amount_untaxed, purchase_amount)
+        self.assertEqual(
+            category_civ_depreciation_type.base_max_amount, max_depreciable_amount
+        )
+        self.assertGreater(purchase_amount, max_depreciable_amount)
+
+        # Act
+        asset = self._link_asset_move(
+            purchase_invoice,
+            "create",
+            wiz_values={
+                "name": "Test asset",
+                "category_id": category,
+            },
+        )
+
+        # Assert
+        self.assertEqual(asset.category_id, category)
+        civ_depreciation = asset.depreciation_ids.filtered(
+            lambda x: x.type_id == civ_type
+        )
+        self.assertEqual(civ_depreciation.base_max_amount, max_depreciable_amount)
+        self.assertEqual(civ_depreciation.amount_depreciable, max_depreciable_amount)
 
     def test_journal_prev_year(self):
         """
@@ -708,7 +754,7 @@ class TestAssets(Common):
             sale_invoice,
             "partial_dismiss",
             wiz_values={
-                "asset_id": asset,
+                "l10n_it_asset_id": asset,
                 "asset_purchase_amount": partial_dismiss_purchase_amount,
                 "depreciated_fund_amount": partial_dismiss_fund_amount,
             },
@@ -724,10 +770,53 @@ class TestAssets(Common):
         report = self._get_report(report_date, "journal")
 
         # Assert
-        asset_report = report.report_asset_ids.filtered(lambda ar: ar.asset_id == asset)
+        asset_report = report.report_l10n_it_asset_ids.filtered(
+            lambda ar: ar.l10n_it_asset_id == asset
+        )
         asset_report_depreciation_line = (
             asset_report.report_depreciation_ids.report_depreciation_year_line_ids
         )
         self.assertEqual(
             asset_report_depreciation_line.amount_residual, expected_residual_amount
         )
+
+    def test_open_manage_asset_wiz(self):
+        manager_user = self.user
+        account_user = self.account_user
+        forbidden_user = self.env.ref("base.user_demo")
+        forbidden_user.groups_id -= (
+            self.env.ref("l10n_it_asset_management.group_asset_user")
+            | self.env.ref("account.group_account_manager")
+            | self.env.ref("l10n_it_asset_management.group_account_invoice_assets")
+        )
+        self.assertFalse(
+            forbidden_user.has_group("l10n_it_asset_management.group_asset_user")
+        )
+
+        invoice = self.env["account.move"].search([("line_ids", "!=", False)])[0]
+        with self.assertRaises(AccessError):
+            invoice.with_user(forbidden_user).open_wizard_manage_asset()
+        invoice.with_user(manager_user).open_wizard_manage_asset()
+        invoice.with_user(account_user).open_wizard_manage_asset()
+
+        asset_category = self.env["asset.category"].search([])[0]
+        asset_category.asset_account_id = invoice.invoice_line_ids.mapped("account_id")
+        asset_wiz = (
+            self.env["wizard.account.move.manage.asset"]
+            .with_context(show_asset=True)
+            .create(
+                [
+                    {
+                        "name": "Test Asset Name",
+                        "category_id": asset_category.id,
+                        "management_type": "create",
+                        "move_ids": [(6, 0, invoice.ids)],
+                        "move_line_ids": [(6, 0, invoice.invoice_line_ids.ids)],
+                    }
+                ]
+            )
+        )
+        with self.assertRaises(AccessError):
+            asset_wiz.with_user(forbidden_user).link_asset()
+        asset_wiz.with_user(manager_user).link_asset()
+        asset_wiz.with_user(account_user).link_asset()

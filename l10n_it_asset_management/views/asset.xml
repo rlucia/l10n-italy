@@ -145,13 +145,14 @@
                                     nolabel="1"
                                 >
                                     <tree>
-                                        <field name="asset_id" invisible="1" />
+                                        <field name="l10n_it_asset_id" invisible="1" />
                                         <field name="type_id" />
                                         <field name="mode_id" />
                                         <field name="pro_rata_temporis" />
                                         <field name="date_start" />
                                         <field name="percentage" />
                                         <field name="base_coeff" />
+                                        <field name="base_max_amount" />
                                         <field name="amount_depreciable" />
                                         <field name="amount_depreciable_updated" />
                                         <field name="amount_depreciated" />
@@ -175,7 +176,7 @@
                                 nolabel="1"
                             >
                                 <tree>
-                                    <field name="asset_id" />
+                                    <field name="l10n_it_asset_id" />
                                     <field name="dep_line_id" />
                                     <field name="relation_type" />
                                     <field name="move_id" />
